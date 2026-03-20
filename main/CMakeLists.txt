@@ -9,6 +9,7 @@ target_link_libraries(pico_emb
     hardware_irq
     hardware_clocks
     hardware_gpio
+    pico_multicore
 )
 
 # create map/bin/hex/uf2 file etc.
