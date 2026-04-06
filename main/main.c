@@ -1,8 +1,7 @@
-/**
- * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+//  * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
  *
- * SPDX-License-Identifier: BSD-3-Clause
- */
+//  * SPDX-License-Identifier: BSD-3-Clause
+
 
 #include <stdio.h>
 #include "pico/stdlib.h"
@@ -19,9 +18,11 @@ const int BUTTON_BLUE = 22;
 const int BUTTON_RED = 16;
 
 int main() {
-    stdio_init_all();
-    while (true) {
-        printf("Hello, world!\n");
-        sleep_ms(1000);
-    }
+stdio_init_all();
+while (true) {
+    printf("Hello, world!\n");
+    sleep_ms(1000);
 }
+}
+
+
