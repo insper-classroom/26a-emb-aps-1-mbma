@@ -1,7 +1,8 @@
 /*    File win.wav
  *    Sample rate 11000 Hz
  */
-
+#ifndef WIN_H
+#define WIN_H
 #define WAV_DATA_LENGTH_WIN 7183
 
 uint8_t WAV_DATA_WIN[] = {
@@ -456,3 +457,6 @@ uint8_t WAV_DATA_WIN[] = {
     130,130,130,130,130,130,130,130,130,130,130,130,130,130,130,130,
     130,130,130,130,130,130,130,130,130,130,130,130,130,130,130,130    
 };
+
+
+#endif 

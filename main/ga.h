@@ -1,3 +1,6 @@
+#ifndef GA_H
+#define GA_H
+
 #define WAV_DATA_LENGTH_GA 14255
 
 uint8_t WAV_DATA_GA[] = {
@@ -893,3 +896,5 @@ uint8_t WAV_DATA_GA[] = {
     82,82,82,82,82,82,82,82,82,82,82,82,82,82,82,82,
     82,82,82,82,82,82,82,82,82,82,82,82,82,82,82,82    
 };
+
+#endif

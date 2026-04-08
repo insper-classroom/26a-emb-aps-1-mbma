@@ -29,14 +29,14 @@
 #define MAX_LEVELS       7
 #define BUTTON_COUNT     4
 #define TIMEOUT_US       15000000u // 15s
-#define DEBOUNCE_US      250000u // 250ms 
-#define AUDIO_STEP       1 // velocidade voz
+#define DEBOUNCE_US      250000u   // 250ms
+#define AUDIO_STEP       1         // velocidade voz
 #define LED_OFF_MS_SEQ   240
 #define LED_OFF_MS_PRESS 120
-#define CMD_AUDIO_STOP 0xFFFFFFFFu // para o audio imediatamente
-#define CMD_AUDIO_WIN  0xFFFFFFFEu // toca som de vitoria
-#define CMD_AUDIO_LOSE 0xFFFFFFFDu // toca som de derrota
-#define RESP_AUDIO_DONE 0x00000001u // audio terminou
+#define CMD_AUDIO_STOP   0xFFFFFFFFu // para o audio imediatamente
+#define CMD_AUDIO_WIN    0xFFFFFFFEu // toca som de vitoria
+#define CMD_AUDIO_LOSE   0xFFFFFFFDu // toca som de derrota
+#define RESP_AUDIO_DONE  0x00000001u // audio terminou
 
 // Tabelas de audio (0=GREEN, 1=YELLOW, 2=BLUE, 3=RED)
 static const uint8_t *const AUDIO_DATA[BUTTON_COUNT] = {
@@ -48,44 +48,53 @@ static const uint32_t AUDIO_LEN[BUTTON_COUNT] = {
 };
 
 // Lista leds, botões e cores
-static const uint LEDS[BUTTON_COUNT]    = {10, 11, 12, 13};
+static const uint LEDS[BUTTON_COUNT] = {10, 11, 12, 13};
 static const uint BUTTONS[BUTTON_COUNT] = {27, 26, 22, 16};
 static const char *COLOR_NAMES[BUTTON_COUNT] = {"GREEN", "YELLOW", "BLUE", "RED"};
 
 // Ordem fisica dos LEDs para exibicao binaria da pontuacao
 static const uint8_t ORDEM_PONTUACAO[BUTTON_COUNT] = {1, 3, 0, 2};
 
-// Estado do jogo  (apenas Core 0 escreve)
-static uint8_t g_sequence[MAX_LEVELS];
-static uint8_t g_level       = 0;
-static uint8_t g_player_pos  = 0;
-static uint8_t g_final_score = 0;
+typedef struct {
+    uint8_t sequence[MAX_LEVELS];
+    uint8_t level;
+    uint8_t player_pos;
+    uint8_t final_score;
 
-static volatile bool     g_input_blocked          = true;
-static volatile bool     g_game_over              = false;
-static volatile bool     g_button_event[BUTTON_COUNT]  = {false};
-static volatile bool     g_button_locked[BUTTON_COUNT] = {false};
-static volatile uint32_t g_last_press_us[BUTTON_COUNT] = {0};
-static volatile uint32_t g_last_input_us           = 0;
+    volatile bool input_blocked;
+    volatile bool game_over;
+    volatile bool button_event[BUTTON_COUNT];
+    volatile bool button_locked[BUTTON_COUNT];
+    volatile uint32_t last_press_us[BUTTON_COUNT];
+    volatile uint32_t last_input_us;
+} game_state_t;
 
-// Estado do audio  (apenas Core 1 escreve - PWM)
-static volatile const uint8_t *g_audio_data    = NULL;
-static volatile uint32_t       g_audio_len     = 0;
-static volatile uint32_t       g_audio_pos     = 0;
-static volatile bool           g_audio_playing = false;
-static int                     g_audio_slice   = 0;
+typedef struct {
+    volatile const uint8_t *data;
+    volatile uint32_t len;
+    volatile uint32_t pos;
+    volatile bool playing;
+    int slice;
+} audio_state_t;
+
+static game_state_t g_game = {
+    .input_blocked = true,
+    .game_over = false,
+};
+
+static audio_state_t g_audio = {0};
 
 // CORE 1 — gerenciamento de audio via PWM
 static void pwm_interrupt_handler(void) {
-    pwm_clear_irq(g_audio_slice);
+    pwm_clear_irq(g_audio.slice);
 
-    if (g_audio_playing && g_audio_data != NULL && g_audio_pos < (g_audio_len << 3)) {
-        pwm_set_gpio_level(AUDIO_PIN, g_audio_data[g_audio_pos >> 3] / 8);
-        g_audio_pos += AUDIO_STEP;
+    if (g_audio.playing && g_audio.data != NULL && g_audio.pos < (g_audio.len << 3)) {
+        pwm_set_gpio_level(AUDIO_PIN, g_audio.data[g_audio.pos >> 3] / 8);
+        g_audio.pos += AUDIO_STEP;
     } else {
         pwm_set_gpio_level(AUDIO_PIN, 0);
-        if (g_audio_playing) {
-            g_audio_playing = false;
+        if (g_audio.playing) {
+            g_audio.playing = false;
             // Avisa o Core 0 que o audio terminou
             multicore_fifo_push_blocking(RESP_AUDIO_DONE);
         }
@@ -94,52 +103,49 @@ static void pwm_interrupt_handler(void) {
 
 static void core1_audio_play(const uint8_t *data, uint32_t len) {
     irq_set_enabled(PWM_IRQ_WRAP, false);
-    g_audio_playing = false;
-    g_audio_data    = data;
-    g_audio_len     = len;
-    g_audio_pos     = 0;
-    g_audio_playing = true;
+    g_audio.playing = false;
+    g_audio.data = data;
+    g_audio.len = len;
+    g_audio.pos = 0;
+    g_audio.playing = true;
     irq_set_enabled(PWM_IRQ_WRAP, true);
 }
 
 static void core1_audio_stop(void) {
     irq_set_enabled(PWM_IRQ_WRAP, false);
-    g_audio_playing = false;
-    g_audio_data    = NULL;
-    g_audio_len     = 0;
-    g_audio_pos     = 0;
+    g_audio.playing = false;
+    g_audio.data = NULL;
+    g_audio.len = 0;
+    g_audio.pos = 0;
     pwm_set_gpio_level(AUDIO_PIN, 0);
     irq_set_enabled(PWM_IRQ_WRAP, true);
 }
 
 void core1_entry(void) {
     gpio_set_function(AUDIO_PIN, GPIO_FUNC_PWM);
-    g_audio_slice = pwm_gpio_to_slice_num(AUDIO_PIN);
+    g_audio.slice = pwm_gpio_to_slice_num(AUDIO_PIN);
 
-    pwm_clear_irq(g_audio_slice);
-    pwm_set_irq_enabled(g_audio_slice, true);
+    pwm_clear_irq(g_audio.slice);
+    pwm_set_irq_enabled(g_audio.slice, true);
     irq_set_exclusive_handler(PWM_IRQ_WRAP, pwm_interrupt_handler);
     irq_set_enabled(PWM_IRQ_WRAP, true);
 
     pwm_config config = pwm_get_default_config();
     pwm_config_set_clkdiv(&config, 8.0f);
     pwm_config_set_wrap(&config, 250);
-    pwm_init(g_audio_slice, &config, true);
+    pwm_init(g_audio.slice, &config, true);
     pwm_set_gpio_level(AUDIO_PIN, 0);
 
-    //espera comandos do Core 0 via FIFO
+    // espera comandos do Core 0 via FIFO
     while (true) {
         uint32_t cmd = multicore_fifo_pop_blocking();
 
         if (cmd == CMD_AUDIO_STOP) {
             core1_audio_stop();
-
         } else if (cmd == CMD_AUDIO_WIN) {
             core1_audio_play(WAV_DATA_WIN, WAV_DATA_LENGTH_WIN);
-
         } else if (cmd == CMD_AUDIO_LOSE) {
             core1_audio_play(WAV_DATA_GA, WAV_DATA_LENGTH_GA);
-
         } else if (cmd < BUTTON_COUNT) {
             core1_audio_play(AUDIO_DATA[cmd], AUDIO_LEN[cmd]);
         }
@@ -169,15 +175,17 @@ static int color_from_gpio(uint gpio) {
     }
     return -1;
 }
+
 static void all_leds_off(void) {
     for (int i = 0; i < BUTTON_COUNT; i++) gpio_put(LEDS[i], 0);
 }
+
 static void flush_button_events(void) {
     uint32_t now = time_us_32();
     for (int i = 0; i < BUTTON_COUNT; i++) {
-        g_button_event[i]  = false;
-        g_button_locked[i] = false;
-        g_last_press_us[i] = now;
+        g_game.button_event[i] = false;
+        g_game.button_locked[i] = false;
+        g_game.last_press_us[i] = now;
     }
 }
 
@@ -188,21 +196,21 @@ static void gpio_callback(uint gpio, uint32_t events) {
     uint32_t now = time_us_32();
 
     if (events & GPIO_IRQ_EDGE_FALL) {
-        if (g_button_locked[idx]) return;
-        if ((now - g_last_press_us[idx]) < DEBOUNCE_US) return;
+        if (g_game.button_locked[idx]) return;
+        if ((now - g_game.last_press_us[idx]) < DEBOUNCE_US) return;
 
-        g_last_press_us[idx] = now;
-        g_button_locked[idx] = true;
+        g_game.last_press_us[idx] = now;
+        g_game.button_locked[idx] = true;
 
-        if (!g_input_blocked) {
-            g_button_event[idx] = true;
+        if (!g_game.input_blocked) {
+            g_game.button_event[idx] = true;
         }
     }
 
     if (events & GPIO_IRQ_EDGE_RISE) {
         // So desbloqueia apos o debounce, evitando bounce no release
-        if ((now - g_last_press_us[idx]) >= DEBOUNCE_US) {
-            g_button_locked[idx] = false;
+        if ((now - g_game.last_press_us[idx]) >= DEBOUNCE_US) {
+            g_game.button_locked[idx] = false;
         }
     }
 }
@@ -241,38 +249,38 @@ static void blink_led_com_audio(int idx, uint32_t off_ms) {
 }
 
 static void game_reset(void) {
-    g_input_blocked = true;
-    g_level         = 0;
-    g_player_pos    = 0;
-    g_game_over     = false;
-    g_final_score   = 0;
+    g_game.input_blocked = true;
+    g_game.level = 0;
+    g_game.player_pos = 0;
+    g_game.game_over = false;
+    g_game.final_score = 0;
 
     all_leds_off();
     audio_stop_request();
 
     sleep_ms(80);
     flush_button_events();
-    g_last_input_us = time_us_32();
+    g_game.last_input_us = time_us_32();
 }
 
 static void sequence_add_step(void) {
-    if (g_level < MAX_LEVELS) {
-        g_sequence[g_level] = (uint8_t)(rand() % BUTTON_COUNT);
-        g_level++;
+    if (g_game.level < MAX_LEVELS) {
+        g_game.sequence[g_game.level] = (uint8_t)(rand() % BUTTON_COUNT);
+        g_game.level++;
     }
 }
 
 static void sequence_show(void) {
-    g_input_blocked = true;
+    g_game.input_blocked = true;
     all_leds_off();
     sleep_ms(250);
 
     printf("Sequencia: ");
-    for (uint8_t i = 0; i < g_level; i++) printf("%s ", COLOR_NAMES[g_sequence[i]]);
+    for (uint8_t i = 0; i < g_game.level; i++) printf("%s ", COLOR_NAMES[g_game.sequence[i]]);
     printf("\n");
 
-    for (uint8_t i = 0; i < g_level; i++) {
-        blink_led_com_audio(g_sequence[i], LED_OFF_MS_SEQ);
+    for (uint8_t i = 0; i < g_game.level; i++) {
+        blink_led_com_audio(g_game.sequence[i], LED_OFF_MS_SEQ);
     }
 
     all_leds_off();
@@ -280,51 +288,51 @@ static void sequence_show(void) {
 }
 
 static void handle_player_step(int idx) {
-    g_last_input_us = time_us_32();
+    g_game.last_input_us = time_us_32();
 
     blink_led_com_audio(idx, LED_OFF_MS_PRESS);
 
-    if (idx == g_sequence[g_player_pos]) {
-        g_player_pos++;
+    if (idx == g_game.sequence[g_game.player_pos]) {
+        g_game.player_pos++;
         printf("OK: %s\n", COLOR_NAMES[idx]);
-        if (g_player_pos >= g_level) {
-            printf("Nivel %u completo!\n", g_level);
-            g_final_score = g_level;
+        if (g_game.player_pos >= g_game.level) {
+            printf("Nivel %u completo!\n", g_game.level);
+            g_game.final_score = g_game.level;
         }
     } else {
         printf("Errou: %s\n", COLOR_NAMES[idx]);
-        g_game_over = true;
+        g_game.game_over = true;
     }
 }
 
 static void wait_player_repeat(void) {
-    g_player_pos    = 0;
-    g_last_input_us = time_us_32();
-    g_input_blocked = false;
+    g_game.player_pos = 0;
+    g_game.last_input_us = time_us_32();
+    g_game.input_blocked = false;
 
-    while (!g_game_over && g_player_pos < g_level) {
+    while (!g_game.game_over && g_game.player_pos < g_game.level) {
         for (int i = 0; i < BUTTON_COUNT; i++) {
-            if (g_button_event[i]) {
+            if (g_game.button_event[i]) {
                 // Confirmacao: descarta se o pino ja voltou para alto
                 if (gpio_get(BUTTONS[i]) != 0) {
-                    g_button_event[i] = false;
+                    g_game.button_event[i] = false;
                     continue;
                 }
-                g_button_event[i] = false;
+                g_game.button_event[i] = false;
                 handle_player_step(i);
-                if (g_game_over) break;
+                if (g_game.game_over) break;
             }
         }
 
-        if (!g_game_over && (time_us_32() - g_last_input_us) > TIMEOUT_US) {
+        if (!g_game.game_over && (time_us_32() - g_game.last_input_us) > TIMEOUT_US) {
             printf("Time out!\n");
-            g_game_over = true;
+            g_game.game_over = true;
         }
 
         tight_loop_contents();
     }
 
-    g_input_blocked = true;
+    g_game.input_blocked = true;
 }
 
 static void game_over_fx(void) {
@@ -379,37 +387,38 @@ int main(void) {
 
     sleep_ms(2000);
     printf("Genius\n");
+
     while (true) {
         printf("Aguardando interruptor ligar\n");
         while (gpio_get(SWITCH_PIN) == 1) tight_loop_contents();
 
-        printf("Interruptor ON! Jogo começçando\n");
+        printf("Interruptor ON! Jogo começando\n");
         sleep_ms(500);
 
         game_reset();
 
-        while (!g_game_over && g_level < MAX_LEVELS) {
+        while (!g_game.game_over && g_game.level < MAX_LEVELS) {
             sequence_add_step();
-            printf("Nivel %u\n", g_level);
+            printf("Nivel %u\n", g_game.level);
             sequence_show();
             wait_player_repeat();
 
-            if (!g_game_over) {
+            if (!g_game.game_over) {
                 sleep_ms(250);
                 flush_button_events();
             }
         }
 
-        if (g_game_over) {
-            printf("Game over. Pontuação: %u\n", g_final_score);
+        if (g_game.game_over) {
+            printf("Game over. Pontuação: %u\n", g_game.final_score);
             audio_play_and_wait(CMD_AUDIO_LOSE);
             game_over_fx();
-            show_score_blink(g_final_score);
+            show_score_blink(g_game.final_score);
         } else {
-            printf("Vc venceu! Pontuação: %u\n", g_final_score);
+            printf("Vc venceu! Pontuação: %u\n", g_game.final_score);
             audio_play_and_wait(CMD_AUDIO_WIN);
             victory_fx();
-            show_score_blink(g_final_score);
+            show_score_blink(g_game.final_score);
         }
 
         sleep_ms(1500);
