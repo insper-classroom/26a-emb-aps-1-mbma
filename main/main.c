@@ -61,28 +61,28 @@ typedef struct {
     uint8_t player_pos;
     uint8_t final_score;
 
-    volatile bool input_blocked;
-    volatile bool game_over;
-    volatile bool button_event[BUTTON_COUNT];
-    volatile bool button_locked[BUTTON_COUNT];
-    volatile uint32_t last_press_us[BUTTON_COUNT];
-    volatile uint32_t last_input_us;
+    bool input_blocked;
+    bool game_over;
+    bool button_event[BUTTON_COUNT];
+    bool button_locked[BUTTON_COUNT];
+    uint32_t last_press_us[BUTTON_COUNT];
+    uint32_t last_input_us;
 } game_state_t;
 
 typedef struct {
-    volatile const uint8_t *data;
-    volatile uint32_t len;
-    volatile uint32_t pos;
-    volatile bool playing;
+    const uint8_t *data;
+    uint32_t len;
+    uint32_t pos;
+    bool playing;
     int slice;
 } audio_state_t;
 
-static game_state_t g_game = {
+static volatile game_state_t g_game = {
     .input_blocked = true,
     .game_over = false,
 };
 
-static audio_state_t g_audio = {0};
+static volatile audio_state_t g_audio = {0};
 
 // CORE 1 — gerenciamento de audio via PWM
 static void pwm_interrupt_handler(void) {
