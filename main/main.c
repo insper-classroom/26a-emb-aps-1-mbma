@@ -84,7 +84,6 @@ static void pwm_interrupt_handler(void);
 static void wait_audio_finish(void);
 static void blink_led_com_audio(int idx, uint32_t off_ms);
 static void flush_button_events(void);
-//static bool all_buttons_released(void);
 
 //prototipos noos
 static void game_over_fx(void);
@@ -197,7 +196,6 @@ static void flush_button_events(void)
     {
         g_button_event[i] = false;
         g_button_locked[i] = false;
-        //g_last_press_us[i] = now;
         g_last_press_us[i] = now;
     }
 }
@@ -212,8 +210,7 @@ static void gpio_callback(uint gpio, uint32_t events)
 
     if (events & GPIO_IRQ_EDGE_FALL)
     {
-        //if (gpio_get(gpio) != 0)
-         //   return;
+    
         if (g_button_locked[idx])
             return;
         if ((now - g_last_press_us[idx]) < DEBOUNCE_US)
@@ -362,14 +359,6 @@ static void wait_player_repeat(void)
 {
     g_player_pos = 0;
     g_last_input_us = time_us_32();
-
-    //flush_button_events();
-
-    //while (!all_buttons_released())
-    //{
-    //    tight_loop_contents();
-    //}
-    //sleep_ms(20);
 
     g_input_blocked = false;
 
