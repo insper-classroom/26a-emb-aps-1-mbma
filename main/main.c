@@ -24,7 +24,7 @@
 #define MAX_LEVELS 10
 #define BUTTON_COUNT 4
 #define TIMEOUT_US 15000000u
-#define DEBOUNCE_US 180000u
+#define DEBOUNCE_US 250000u
 
 #define AUDIO_STEP 1
 #define LED_OFF_MS_SEQ 240
@@ -55,7 +55,9 @@ static uint8_t g_sequence[MAX_LEVELS];
 static uint8_t g_level = 0;
 static uint8_t g_player_pos = 0;
 
-// Quando true, nenhum clique é aceito.
+// FIX: g_input_blocked é o único guard de input — substitui o uso duplo
+//      de g_showing_sequence para esse propósito. Qualquer código que não
+//      queira receber botões seta essa flag como true.
 static volatile bool g_input_blocked = true;
 
 static volatile bool g_game_over = false;
@@ -78,7 +80,6 @@ static void pwm_interrupt_handler(void);
 static void wait_audio_finish(void);
 static void blink_led_com_audio(int idx, uint32_t off_ms);
 static void flush_button_events(void);
-static bool all_buttons_released(void);
 
 static int color_from_gpio(uint gpio) {
     for (int i = 0; i < BUTTON_COUNT; i++) {
@@ -120,9 +121,7 @@ static void wait_audio_finish(void) {
 static void blink_led_com_audio(int idx, uint32_t off_ms) {
     audio_start(idx);
     gpio_put(LEDS[idx], 1);
-
     wait_audio_finish();
-
     gpio_put(LEDS[idx], 0);
     sleep_ms(off_ms);
 }
@@ -139,20 +138,18 @@ static void pwm_interrupt_handler(void) {
     }
 }
 
+// FIX: descarta todos os eventos acumulados e reancora o timestamp de
+//      debounce para o momento atual, evitando que pressionamentos
+//      físicos feitos durante efeitos/sequências "vazem" para a próxima
+//      fase do jogo.
 static void flush_button_events(void) {
     uint32_t now = time_us_32();
     for (int i = 0; i < BUTTON_COUNT; i++) {
         g_button_event[i] = false;
         g_button_locked[i] = false;
-        g_last_press_us[i] = now;
+        g_last_press_us[i] = now;  // FIX: ancoragem no tempo atual,
+                                   // não em 0 (que pularia o debounce).
     }
-}
-
-static bool all_buttons_released(void) {
-    for (int i = 0; i < BUTTON_COUNT; i++) {
-        if (gpio_get(BUTTONS[i]) == 0) return false;
-    }
-    return true;
 }
 
 static void gpio_callback(uint gpio, uint32_t events) {
@@ -162,22 +159,27 @@ static void gpio_callback(uint gpio, uint32_t events) {
     uint32_t now = time_us_32();
 
     if (events & GPIO_IRQ_EDGE_FALL) {
-        if (gpio_get(gpio) != 0) return;
         if (g_button_locked[idx]) return;
         if ((now - g_last_press_us[idx]) < DEBOUNCE_US) return;
 
         g_last_press_us[idx] = now;
         g_button_locked[idx] = true;
 
+        // FIX: usa g_input_blocked em vez do par g_showing_sequence &&
+        //      !g_game_over — uma flag única, controlada explicitamente
+        //      em todos os pontos que não querem receber input.
         if (!g_input_blocked) {
             g_button_event[idx] = true;
         }
     }
 
     if (events & GPIO_IRQ_EDGE_RISE) {
+        // FIX: só desbloqueia se passou tempo suficiente desde o press,
+        //      evitando que bouncing no release gere um FALL espúrio logo depois.
         if ((now - g_last_press_us[idx]) >= DEBOUNCE_US) {
             g_button_locked[idx] = false;
         }
+        // Se não passou tempo, mantém locked — o próximo RISE vai desbloquear.
     }
 }
 
@@ -226,6 +228,7 @@ static void audio_init(void) {
 }
 
 static void game_reset(void) {
+    // FIX: bloqueia input durante todo o processo de reset.
     g_input_blocked = true;
 
     g_level = 0;
@@ -235,9 +238,17 @@ static void game_reset(void) {
     all_leds_off();
     audio_stop();
 
+    // FIX: pequena pausa para que qualquer pressionamento físico residual
+    //      que ocorreu durante os efeitos termine de se propagar pelas
+    //      interrupções antes de limpar os eventos.
     sleep_ms(80);
+
     flush_button_events();
+
     g_last_input_us = time_us_32();
+
+    // input ainda bloqueado — só é liberado em wait_player_repeat(),
+    // depois que a sequência já foi exibida.
 }
 
 static void sequence_add_step(void) {
@@ -248,11 +259,15 @@ static void sequence_add_step(void) {
 }
 
 static void sequence_show(void) {
+    // g_input_blocked já é true aqui (vem do game_reset ou do fim de
+    // wait_player_repeat). Confirmamos explicitamente para deixar claro.
     g_input_blocked = true;
 
     all_leds_off();
     sleep_ms(250);
 
+    // DEBUG: imprime a sequência esperada para facilitar diagnóstico.
+    //        Remova este bloco após confirmar que os bugs foram resolvidos.
     printf("Sequencia: ");
     for (uint8_t i = 0; i < g_level; i++) {
         printf("%s ", COLOR_NAMES[g_sequence[i]]);
@@ -265,6 +280,10 @@ static void sequence_show(void) {
     }
 
     all_leds_off();
+
+    // FIX: descarta qualquer evento que tenha "vazado" durante a exibição
+    //      da sequência (toque acidental, ruído elétrico, etc.) antes de
+    //      liberar o input ao jogador.
     flush_button_events();
 }
 
@@ -276,7 +295,6 @@ static void handle_player_step(int idx) {
     if (idx == g_sequence[g_player_pos]) {
         g_player_pos++;
         printf("OK: %s\n", COLOR_NAMES[idx]);
-
         if (g_player_pos >= g_level) {
             printf("Level %u complete!\n", g_level);
         }
@@ -290,18 +308,20 @@ static void wait_player_repeat(void) {
     g_player_pos = 0;
     g_last_input_us = time_us_32();
 
-    flush_button_events();
-
-    while (!all_buttons_released()) {
-        tight_loop_contents();
-    }
-    sleep_ms(20);
-
+    // FIX: libera o input somente aqui, quando o jogo está pronto para
+    //      receber o input do jogador.
     g_input_blocked = false;
 
     while (!g_game_over && g_player_pos < g_level) {
         for (int i = 0; i < BUTTON_COUNT; i++) {
             if (g_button_event[i]) {
+                // Confirmação: verifica que o pino ainda está baixo antes
+                // de processar — elimina fantasmas gerados por ruído elétrico
+                // que já dissipou antes de chegar aqui.
+                if (gpio_get(BUTTONS[i]) != 0) {
+                    g_button_event[i] = false;
+                    continue;
+                }
                 g_button_event[i] = false;
                 handle_player_step(i);
                 if (g_game_over) break;
@@ -316,10 +336,13 @@ static void wait_player_repeat(void) {
         tight_loop_contents();
     }
 
+    // FIX: bloqueia o input imediatamente ao sair do loop (acerto do
+    //      último passo ou game over), antes de qualquer efeito visual.
     g_input_blocked = true;
 }
 
 static void game_over_fx(void) {
+    // g_input_blocked já é true aqui (setado no fim de wait_player_repeat).
     for (int k = 0; k < 4; k++) {
         for (int i = 0; i < BUTTON_COUNT; i++) gpio_put(LEDS[i], 1);
         sleep_ms(120);
@@ -329,6 +352,7 @@ static void game_over_fx(void) {
 }
 
 static void victory_fx(void) {
+    // g_input_blocked já é true aqui (setado no fim de wait_player_repeat).
     for (int k = 0; k < 6; k++) {
         for (int i = 0; i < BUTTON_COUNT; i++) gpio_put(LEDS[i], 1);
         sleep_ms(80);
@@ -349,6 +373,9 @@ int main(void) {
 
     while (true) {
         printf("Aguardando switch ligar...\n");
+
+        // FIX: input bloqueado enquanto espera o switch — inicializado
+        //      como true no topo do arquivo para cobrir esse estado.
         while (gpio_get(SWITCH_PIN) == 1) {
             tight_loop_contents();
         }
@@ -367,7 +394,8 @@ int main(void) {
 
             if (!g_game_over) {
                 sleep_ms(250);
-                flush_button_events();
+                flush_button_events(); // FIX: descarta eventos que escaparam
+                                       //      durante o ultimo blink do acerto final.
             }
         }
 
